@@ -388,3 +388,84 @@ def get_qf_matching(algo, donation_df, matching_cap_percent, matching_amount, cl
         result['matching_amount'] = result['matching_amount'] * (matching_amount / sum(result['matching_amount']))
 
     return result
+
+def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_percent=0.2, boost_multiplier=2.0):
+    """
+    Calculate quadratic funding with optional boost factors for donors.
+    
+    Args:
+        donation_df: DataFrame with columns ['voter', 'project_name', 'recipient_address', 'amountUSD']
+        boost_df: Optional DataFrame with columns ['address', 'scale'] 
+        matching_pool: Total matching funds available
+        matching_cap_percent: Maximum percentage of matching funds any project can receive (0-1)
+        boost_multiplier: Multiplier for boosting contributions (default: 2.0)
+    """
+    # Apply boosts if provided
+    if boost_df is not None:
+        # Merge boosts into donations
+        boosted_donations = donation_df.merge(
+            boost_df,
+            how='left',
+            left_on='voter',
+            right_on='address'
+        )
+        
+        # Non-boosted donations are initially set to 0
+        boosted_donations = boosted_donations.fillna(0)
+        
+        # Calculate boosted amounts using the boost multiplier
+        boosted_donations['boost_coefficient'] = 1 + boosted_donations['scale']
+        boosted_donations['amountUSD'] = boosted_donations['boost_coefficient'] * boosted_donations['amountUSD']
+        
+        donation_df = boosted_donations
+
+    # Group donations by project
+    projects = donation_df.groupby(['project_name', 'recipient_address']).agg({
+        'amountUSD': ['sum', lambda x: np.square(np.sum(np.sqrt(x)))]
+    }).reset_index()
+    
+    projects.columns = ['project_name', 'recipient_address', 'direct_donations', 'funding_mechanism']
+    
+    # Calculate matching funding
+    projects['matching_funding'] = projects['funding_mechanism'] - projects['direct_donations']
+    
+    # Calculate distribution
+    projects['matching_distribution'] = projects['matching_funding'] / projects['matching_funding'].sum()
+    
+    # Apply cap
+    projects['matching_distribution'] = np.minimum(projects['matching_distribution'], matching_cap_percent)
+    
+    # Redistribute excess above cap
+    under_cap_mask = projects['matching_distribution'] < matching_cap_percent
+    if under_cap_mask.any():
+        excess = (1 - projects.loc[~under_cap_mask, 'matching_distribution'].sum())
+        scale_factor = excess / projects.loc[under_cap_mask, 'matching_distribution'].sum()
+        projects.loc[under_cap_mask, 'matching_distribution'] *= scale_factor
+    
+    # Calculate final matching amounts
+    projects['matching_funds'] = projects['matching_distribution'] * matching_pool
+    projects['total_funding'] = projects['matching_funds'] + projects['direct_donations']
+    
+    return projects
+
+def apply_boosts(donations_df, boost_df):
+    """Apply boosts to donations based on token holdings."""
+    # Merge boosts into donations
+    boosted_donations = donations_df.merge(
+        boost_df,
+        how='left',
+        left_on='voter',
+        right_on='address'
+    )
+    
+    # Handle non-boosted donations
+    boosted_donations = boosted_donations.fillna(0)
+    
+    # Calculate boosted amounts
+    boosted_donations['boost_coefficient'] = 1 + boosted_donations['scale']
+    boosted_donations['amountUSD'] = (
+        boosted_donations['boost_coefficient'] * 
+        boosted_donations['amountUSD']
+    )
+    
+    return boosted_donations

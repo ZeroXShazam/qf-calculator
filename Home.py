@@ -564,7 +564,7 @@ def display_passport_usage(data):
                 )
 
 def calculate_matching_results(data):
-    """Calculate matching results using different strategies (COCM and QF)."""
+    """Calculate matching results using different strategies (COCM, QF, and TQF)."""
     # Apply voting eligibility based on passport scores and donation thresholds
     df_with_passport = fundingutils.apply_voting_eligibility(
         data['df'].copy(), 
@@ -578,19 +578,50 @@ def calculate_matching_results(data):
     matching_cap_amount = data['matching_cap']
     matching_amount = data['matching_available']
 
-    # Calculate matching amounts using both COCM and QF strategies
-    matching_dfs = [fundingutils.get_qf_matching(strategy, votes_df_with_passport, matching_cap_amount, matching_amount, cluster_df=votes_df_with_passport, pct_cocm=data['pct_COCM']) 
-                    for strategy in [data['strat'], 'QF']]
-
-
-    # Merge results from both strategies
-    matching_df = pd.merge(matching_dfs[0], matching_dfs[1], on='project_name', suffixes=(f'_{data["suffix"]}', '_QF'))
+    # Calculate matching amounts using COCM, QF, and TQF strategies
+    matching_dfs = []
     
-    # Add project details and calculate the difference between COCM and QF matching
+    # Add COCM results
+    matching_dfs.append(fundingutils.get_qf_matching(
+        data['strat'], 
+        votes_df_with_passport, 
+        matching_cap_amount, 
+        matching_amount, 
+        cluster_df=votes_df_with_passport, 
+        pct_cocm=data['pct_COCM']
+    ))
+    
+    # Add QF results
+    matching_dfs.append(fundingutils.get_qf_matching(
+        'QF', 
+        votes_df_with_passport, 
+        matching_cap_amount, 
+        matching_amount
+    ))
+    
+    # Add TQF results
+    tqf_results = fundingutils.tunable_qf(
+        df_with_passport,
+        boost_df=data.get('scaling_df'),
+        matching_pool=matching_amount,
+        matching_cap_percent=matching_cap_amount/100,
+        boost_multiplier=data['tqf_boost_multiplier']
+    )
+    tqf_df = pd.DataFrame({
+        'project_name': tqf_results['project_name'],
+        'matching_amount_TQF': tqf_results['matching_funds']
+    })
+
+    # Merge all results
+    matching_df = pd.merge(matching_dfs[0], matching_dfs[1], on='project_name', suffixes=(f'_{data["suffix"]}', '_QF'))
+    matching_df = pd.merge(matching_df, tqf_df, on='project_name', how='left')
+    
+    # Add project details and calculate differences
     df_unique = data['df'][['project_name', 'chain_id', 'round_id', 'application_id']].drop_duplicates()
     matching_df = pd.merge(matching_df, df_unique, on='project_name', how='left')
     matching_df['Project Page'] = 'https://explorer.gitcoin.co/#/round/' + matching_df['chain_id'].astype(str) + '/' + matching_df['round_id'].astype(str) + '/' + matching_df['application_id'].astype(str)
     matching_df['Δ Match'] = matching_df[f'matching_amount_{data["suffix"]}'] - matching_df['matching_amount_QF']
+    matching_df['Δ TQF'] = matching_df['matching_amount_TQF'] - matching_df['matching_amount_QF']
     
     return matching_df.sort_values(f'matching_amount_{data["suffix"]}', ascending=False)
 
@@ -601,11 +632,13 @@ def display_matching_results(matching_df, matching_token_symbol, s):
         "project_name": st.column_config.TextColumn("Project"),
         f"matching_amount_{s}": st.column_config.NumberColumn(f"{s} Match", format="%.2f"),
         "matching_amount_QF": st.column_config.NumberColumn("QF Match", format="%.2f"),
+        "matching_amount_TQF": st.column_config.NumberColumn("TQF Match", format="%.2f"),
         "Δ Match": st.column_config.NumberColumn("Δ Match", format="%.2f"),
+        "Δ TQF": st.column_config.NumberColumn("Δ TQF", format="%.2f"),
         "Project Page": st.column_config.LinkColumn("Project Page", display_text="Visit")
     }
     
-    display_columns = ['project_name', f'matching_amount_{s}', 'matching_amount_QF', 'Δ Match', 'Project Page']
+    display_columns = ['project_name', f'matching_amount_{s}', 'matching_amount_QF', 'matching_amount_TQF', 'Δ Match', 'Δ TQF', 'Project Page']
     st.dataframe(
         matching_df[display_columns],
         use_container_width=True,
@@ -616,10 +649,10 @@ def display_matching_results(matching_df, matching_token_symbol, s):
     st.markdown(f'Matching Values shown above are in **{matching_token_symbol}**')
 
 def select_matching_strategy(s):
-    """Allow user to select the matching strategy for download."""
+    """Allow user to select the matching strategy to download."""
     return st.selectbox(
         'Select the matching strategy to download:',
-        (f'{s}', 'QF')
+        (f'{s}', 'QF', 'TQF')
     )
 
 def prepare_output_dataframe(matching_df, strategy_choice, data):
@@ -651,8 +684,9 @@ def prepare_output_dataframe(matching_df, strategy_choice, data):
     matching_token_decimals = data['config_df']['token_decimals'].iloc[0]
     output_df['matchedUSD'] = (output_df['matched'] * data['matching_token_price']).round(2)
     
-    output_df['matched'] = (output_df['matched'] * 10**matching_token_decimals).apply(lambda x: int(x))
-    output_df['totalReceived'] = (output_df['totalReceived'] * 10**matching_token_decimals).apply(lambda x: int(x))
+    # Handle NaN values and convert to integers
+    output_df['matched'] = (output_df['matched'].fillna(0) * 10**matching_token_decimals).astype(int)
+    output_df['totalReceived'] = (output_df['totalReceived'].fillna(0) * 10**matching_token_decimals).astype(int)
     
     # Reorder columns and add placeholder columns required for the output format
     output_df = output_df[[
@@ -778,6 +812,82 @@ def create_matching_distribution_chart(summary_df, token_symbol):
     )
     return fig
 
+def handle_token_distribution_upload(key_suffix=""):
+    """Handle upload of token distribution CSV with a boost multiplier."""
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Token Distribution Data", 
+            type="csv", 
+            key=f"token_dist_{key_suffix}",
+            help="CSV file with columns: [address, balance]"
+        )
+    
+    with col2:
+        boost_multiplier = st.slider(
+            "Boost Multiplier",
+            min_value=1.0,
+            max_value=10.0,
+            value=2.0,
+            step=0.1,
+            format="%.1fx",
+            key=f"boost_mult_{key_suffix}",
+            help="Multiplier for this token's contribution boosting"
+        )
+    
+    if uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            required_cols = ['address', 'balance']
+            if not all(col in df.columns for col in required_cols):
+                st.error(f"CSV must contain columns: {required_cols}")
+                return None
+            
+            df['address'] = df['address'].str.lower()
+            df = df.rename(columns={'balance': 'scale'})
+            df['scale'] = df['scale'] * boost_multiplier
+            
+            st.success("✅ Token distribution loaded successfully")
+            return df
+            
+        except Exception as e:
+            st.error(f"Error processing CSV: {str(e)}")
+            return None
+    return None
+
+def combine_token_distributions(token_dfs):
+    """Combine multiple token distribution DataFrames."""
+    if not token_dfs:
+        return None
+        
+    # Combine all dataframes
+    combined_df = pd.concat(token_dfs)
+    
+    # Group by address and sum the scaled balances
+    combined_df = combined_df.groupby('address')['scale'].sum().reset_index()
+    return combined_df
+
+def handle_token_distributions():
+    """Handle multiple token distributions with boosts."""
+    token_dfs = []
+    
+    # First distribution
+    df1 = handle_token_distribution_upload("1")
+    if df1 is not None:
+        token_dfs.append(df1)
+    
+    # Additional distributions
+    for i in range(st.session_state.num_additional_tokens):
+        df = handle_token_distribution_upload(f"additional_{i}")
+        if df is not None:
+            token_dfs.append(df)
+    
+    # Combine distributions
+    if token_dfs:
+        return combine_token_distributions(token_dfs)
+    return None
+
 def main():
     """Main function to run the Streamlit app."""
     st.image('assets/657c7ed16b14af693c08b92d_GTC-Logotype-Dark.png', width=200)
@@ -791,9 +901,9 @@ def main():
     filterout_df=None
     arbitrary_df=None
     scaling_df=None
+    tqf_boost_multiplier = 2.0  # Default value
+    
     with st.expander("Advanced: Override Passport Scaling"):
-
-        
         if st.toggle('Filter in wallets', value=False, key='filterin-toggle'):
             filterout_df = handle_csv_upload(purpose='filter in')
 
@@ -823,10 +933,46 @@ def main():
                     Pure QF results are always available separately.''')
         c1,c2,c3 = st.columns(3)
         pct = c1.slider('Percent COCM', min_value = 0.25, max_value=1.0, value=1.0, step=0.25)
-    
     # Load and process data
     data = load_data(round_id, chain_id)
     data['scaling_df'] = scaling_df
+
+    with st.expander("Advanced: Tunable Quadratic Funding"):
+        st.write("""
+        Configure TQF parameters and upload token distribution data.
+        Each token distribution can have its own boost multiplier.
+        """)
+        
+        token_dfs = []
+        
+        # First token distribution
+        st.subheader("Token Distribution #1")
+        df1 = handle_token_distribution_upload("1")
+        if df1 is not None:
+            token_dfs.append(df1)
+        
+        # Initialize session state for tracking additional tokens
+        if 'num_additional_tokens' not in st.session_state:
+            st.session_state.num_additional_tokens = 0
+        
+        # Button to add new token distribution
+        if st.button("+ Add Another Token") and st.session_state.num_additional_tokens < 5:
+            st.session_state.num_additional_tokens += 1
+        
+        # Display additional token distributions
+        for i in range(st.session_state.num_additional_tokens):
+            token_num = i + 2  # Start from Token #2
+            st.subheader(f"Token Distribution #{token_num}")
+            df = handle_token_distribution_upload(f"additional_{i}")
+            if df is not None:
+                token_dfs.append(df)
+        
+        # Combine all token distributions
+        if token_dfs:
+            scaling_df = combine_token_distributions(token_dfs)
+            data['scaling_df'] = scaling_df
+
+    data['tqf_boost_multiplier'] = tqf_boost_multiplier
 
     if pct == 1:
         data['strat'] = 'COCM'
