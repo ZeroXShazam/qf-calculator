@@ -389,16 +389,15 @@ def get_qf_matching(algo, donation_df, matching_cap_percent, matching_amount, cl
 
     return result
 
-def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_percent=0.2, boost_multiplier=2.0):
+def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_percent=0.2):
     """
-    Calculate quadratic funding with optional boost factors for donors.
+    Calculate quadratic funding with boost factors from token distributions.
     
     Args:
         donation_df: DataFrame with columns ['voter', 'project_name', 'recipient_address', 'amountUSD']
-        boost_df: Optional DataFrame with columns ['address', 'scale'] 
+        boost_df: Optional DataFrame with columns ['address', 'scale'] where scale includes the boost multiplier
         matching_pool: Total matching funds available
         matching_cap_percent: Maximum percentage of matching funds any project can receive (0-1)
-        boost_multiplier: Multiplier for boosting contributions (default: 2.0)
     """
     # Apply boosts if provided
     if boost_df is not None:
@@ -410,10 +409,10 @@ def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_per
             right_on='address'
         )
         
-        # Non-boosted donations are initially set to 0
+        # Non-boosted donations get scale of 0
         boosted_donations = boosted_donations.fillna(0)
         
-        # Calculate boosted amounts using the boost multiplier
+        # Calculate boosted amounts (scale already includes multiplier)
         boosted_donations['boost_coefficient'] = 1 + boosted_donations['scale']
         boosted_donations['amountUSD'] = boosted_donations['boost_coefficient'] * boosted_donations['amountUSD']
         

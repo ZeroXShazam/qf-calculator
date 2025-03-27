@@ -285,52 +285,69 @@ def display_network_graph(df):
     voters_color = '#C4F092'
     voter_color_string = 'lightgreen'
     line_color = '#6E9A82'
-    # Assuming 'data' is the DataFrame containing all donation information
     
     # Sum amountUSD grouped by voter and recipient_address
     grouped_data = df.groupby(['voter', 'recipient_address']).agg({
         'amountUSD': 'sum',
-        'project_name': 'first'  # Assuming project_name is constant for each recipient_address
+        'project_name': 'first'
     }).reset_index()
 
     count_connections = grouped_data.shape[0]
     count_voters = grouped_data['voter'].nunique()
     count_grants = grouped_data['recipient_address'].nunique()
     max_connections = 2000
+    
     col1, col2 = st.columns([3, 1])
-        
+    
     with col1:
         st.markdown("The below graph visualizes the connections between donors and grantees. " +
-                    f"Donors are represented by {voter_color_string} nodes, while grantees are represented by {grantee_color_string} nodes. " +
-                    f"Each line connecting a donor to a grantee represents a donation.")
+                   f"Donors are represented by {voter_color_string} nodes, while grantees are represented by {grantee_color_string} nodes. " +
+                   f"Each line connecting a donor to a grantee represents a donation.")
         st.markdown("In COCM, projects receive higher matching when their donors support a diverse range of other projects and have unique connection patterns. Conversely, projects get lower matching if their donors primarily support a small number of the same projects.")
 
     with col2:
         pct_to_sample = st.slider("Percentage of connections to sample", 
-                                  min_value=1, 
-                                  max_value=100, 
-                                  value=min(100, int(max_connections / count_connections * 100)),
-                                  step=1,
-                                  help="Adjust this to control the number of connections displayed in the graph. More connections means longer loading times")
+                                min_value=1, 
+                                max_value=100, 
+                                value=min(100, int(max_connections / count_connections * 100)),
+                                step=1,
+                                help="Adjust this to control the number of connections displayed in the graph. More connections means longer loading times")
         st.markdown("**Go fullscreen with the arrows in the top-right for a better view.**")
 
     num_connections_to_sample = int(count_connections * pct_to_sample / 100)
     grouped_data = grouped_data.sample(n=min(num_connections_to_sample, max_connections), random_state=42)
-    count_connections = grouped_data.shape[0]
-
 
     # Initialize a new Graph
     B = nx.Graph()
-
+    
     # Create nodes with the bipartite attribute
     B.add_nodes_from(grouped_data['voter'].unique(), bipartite=0, color=voters_color)
     B.add_nodes_from(grouped_data['recipient_address'].unique(), bipartite=1, color=grants_color)
-
+    
     # Add edges with amountUSD as an attribute
     for _, row in grouped_data.iterrows():
         B.add_edge(row['voter'], row['recipient_address'], amountUSD=row['amountUSD'])
 
-    pos = nx.spring_layout(B, dim=3, k=0.09, iterations=50)
+    try:
+        # Try spring_layout with different backend
+        pos = nx.spring_layout(B, dim=3, k=0.09, iterations=50)
+    except AttributeError:
+        try:
+            # Fallback to numpy-based implementation
+            import numpy as np
+            pos = {}
+            nodes = list(B.nodes())
+            for i, node in enumerate(nodes):
+                pos[node] = np.random.rand(3)  # Random 3D positions
+            for _ in range(50):  # Simple force-directed layout
+                for node in nodes:
+                    neighbors = list(B.neighbors(node))
+                    if neighbors:
+                        center = np.mean([pos[n] for n in neighbors], axis=0)
+                        pos[node] += (center - pos[node]) * 0.1
+        except Exception as e:
+            st.error(f"Failed to create network layout: {str(e)}")
+            return None
 
     # Extract node information
     node_x, node_y, node_z = zip(*pos.values())
@@ -353,9 +370,9 @@ def display_network_graph(df):
     # Create the edge traces
     edge_trace = go.Scatter3d(
         x=edge_x, y=edge_y, z=edge_z,
-        line=dict(width=1, color=line_color),
-        hoverinfo='none',
         mode='lines',
+        line=dict(color=line_color, width=1),
+        hoverinfo='none',
         marker=dict(opacity=0.5))
 
     # Create the node traces
@@ -379,19 +396,17 @@ def display_network_graph(df):
         if node in grouped_data['recipient_address'].values:
             project_name = grouped_data[grouped_data['recipient_address'] == node]['project_name'].iloc[0]
             adj = len(list(B.neighbors(node)))
-            connections_text = f"Connections: {adj}" if pct_to_sample == 100 else f"Sampled Connections: {adj}"
-            node_text.append(f'Project: {project_name}<br>{connections_text}')
+            node_text.append(f'Project: {project_name}<br># Donors: {adj}')
         else:
             adj = len(list(B.neighbors(node)))
-            connections_text = f"Connections: {adj}" if pct_to_sample == 100 else f"Sampled Connections: {adj}"
-            node_text.append(f'Voter: {node[:6]}...{node[-4:]}<br>{connections_text}')
+            node_text.append(f'Donor: {node[:6]}...<br># Projects: {adj}')
     node_trace.text = node_text
 
     # Create the figure
     fig = go.Figure(data=[edge_trace, node_trace],
                     layout=go.Layout(
-                        title=' ',
-                        titlefont=dict(size=20),
+                        title=f'Network of {count_voters} Donors and {count_grants} Projects<br>Showing {count_connections} Connections',
+                        titlefont_size=16,
                         showlegend=False,
                         hovermode='closest',
                         margin=dict(b=20, l=5, r=5, t=40),
@@ -605,7 +620,6 @@ def calculate_matching_results(data):
         boost_df=data.get('scaling_df'),
         matching_pool=matching_amount,
         matching_cap_percent=matching_cap_amount/100,
-        boost_multiplier=data['tqf_boost_multiplier']
     )
     tqf_df = pd.DataFrame({
         'project_name': tqf_results['project_name'],
@@ -901,7 +915,6 @@ def main():
     filterout_df=None
     arbitrary_df=None
     scaling_df=None
-    tqf_boost_multiplier = 2.0  # Default value
     
     with st.expander("Advanced: Override Passport Scaling"):
         if st.toggle('Filter in wallets', value=False, key='filterin-toggle'):
@@ -972,7 +985,6 @@ def main():
             scaling_df = combine_token_distributions(token_dfs)
             data['scaling_df'] = scaling_df
 
-    data['tqf_boost_multiplier'] = tqf_boost_multiplier
 
     if pct == 1:
         data['strat'] = 'COCM'
