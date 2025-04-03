@@ -401,22 +401,8 @@ def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_per
     """
     # Apply boosts if provided
     if boost_df is not None:
-        # Merge boosts into donations
-        boosted_donations = donation_df.merge(
-            boost_df,
-            how='left',
-            left_on='voter',
-            right_on='address'
-        )
-        
-        # Non-boosted donations get scale of 0
-        boosted_donations = boosted_donations.fillna(0)
-        
-        # Calculate boosted amounts (scale already includes multiplier)
-        boosted_donations['boost_coefficient'] = 1 + boosted_donations['scale']
-        boosted_donations['amountUSD'] = boosted_donations['boost_coefficient'] * boosted_donations['amountUSD']
-        
-        donation_df = boosted_donations
+        # Use existing apply_boosts function
+        donation_df = apply_boosts(donation_df, boost_df)
 
     # Group donations by project
     projects = donation_df.groupby(['project_name', 'recipient_address']).agg({
