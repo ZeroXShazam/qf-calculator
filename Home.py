@@ -617,13 +617,13 @@ def calculate_matching_results(data):
     # Add TQF results
     tqf_results = fundingutils.tunable_qf(
         df_with_passport,
-        boost_df=data.get('scaling_df'),
-        matching_pool=matching_amount,
-        matching_cap_percent=matching_cap_amount/100,
+        data['token_distribution_df'],
+        matching_cap_amount,
+        matching_amount,
     )
     tqf_df = pd.DataFrame({
         'project_name': tqf_results['project_name'],
-        'matching_amount_TQF': tqf_results['matching_funds']
+        'matching_amount_TQF': tqf_results['matching_amount']
     })
 
     # Merge all results
@@ -828,42 +828,67 @@ def create_matching_distribution_chart(summary_df, token_symbol):
 
 def handle_token_distribution_upload(key_suffix=""):
     """Handle upload of token distribution CSV with a boost multiplier."""
-    col1, col2 = st.columns([2, 1])
+    col1, col2, col3, col4 = st.columns([2,1,1,1])
     
     with col1:
         uploaded_file = st.file_uploader(
             "Token Distribution Data", 
             type="csv", 
             key=f"token_dist_{key_suffix}",
-            help="CSV file with columns: [address, balance]"
-        )
-    
-    with col2:
-        boost_multiplier = st.slider(
-            "Boost Multiplier",
-            min_value=1.0,
-            max_value=10.0,
-            value=2.0,
-            step=0.1,
-            format="%.1fx",
-            key=f"boost_mult_{key_suffix}",
-            help="Multiplier for this token's contribution boosting"
+            help="CSV with token distribution columns"
         )
     
     if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            required_cols = ['address', 'balance']
-            if not all(col in df.columns for col in required_cols):
-                st.error(f"CSV must contain columns: {required_cols}")
-                return None
+        df = pd.read_csv(uploaded_file)
+        with col2:
+            address_column = st.selectbox(
+                "Address Column",
+                options=df.columns,
+                key=f"address_column_{key_suffix}",
+                help="Column containing addresses"
+            )
+        with col3:
+            target_column = st.selectbox(
+                "Token/Score Column",
+                options=[col for col in df.columns if col != address_column],
+                key=f"target_column_{key_suffix}",
+                help="Column containing token amounts or scores"
+            )
+        
+        with col4:
+            boost_multiplier = st.slider(
+                "Boost Multiplier",
+                min_value=0.1,
+                max_value=10.0,
+                value=2.0,
+                step=0.1,
+                format="%.1fx",
+                key=f"boost_multiplier_{key_suffix}"
+            )
             
-            df['address'] = df['address'].str.lower()
-            df = df.rename(columns={'balance': 'scale'})
-            df['scale'] = df['scale'] * boost_multiplier
+            threshold = st.number_input(
+                "Threshold",
+                value=0.0,
+                step=0.1,
+                key=f"threshold_{key_suffix}",
+                help="Minimum value to consider"
+            )
+
+            # Add comparison constraints
+            constraint_type = st.selectbox(
+                "Constraint Type",
+                options=[">=", ">", "<=", "<"],
+                key=f"constraint_type_{key_suffix}",
+                help="Apply constraint to token values"
+            )
+        
+        try:
+            # Process the data
+            processed_df = df[[address_column, target_column]].copy()
+            processed_df['scale_factor'] = processed_df[target_column].apply(lambda x: boost_multiplier if eval(f"x {constraint_type} {threshold}") else 1)
             
             st.success("✅ Token distribution loaded successfully")
-            return df
+            return processed_df[[address_column, 'scale_factor']],address_column
             
         except Exception as e:
             st.error(f"Error processing CSV: {str(e)}")
@@ -876,10 +901,12 @@ def combine_token_distributions(token_dfs):
         return None
         
     # Combine all dataframes
-    combined_df = pd.concat(token_dfs)
-    
-    # Group by address and sum the scaled balances
-    combined_df = combined_df.groupby('address')['scale'].sum().reset_index()
+    combined_df = pd.DataFrame()
+    for token_df in token_dfs:
+        df = token_df[0]
+        address_column = token_df[1]
+        combined_df = pd.concat([combined_df, df])
+        combined_df = combined_df.groupby(address_column)['scale_factor'].sum().reset_index()
     return combined_df
 
 def handle_token_distributions():
@@ -963,13 +990,12 @@ def main():
         df1 = handle_token_distribution_upload("1")
         if df1 is not None:
             token_dfs.append(df1)
-        
         # Initialize session state for tracking additional tokens
         if 'num_additional_tokens' not in st.session_state:
             st.session_state.num_additional_tokens = 0
         
         # Button to add new token distribution
-        if st.button("+ Add Another Token") and st.session_state.num_additional_tokens < 5:
+        if st.button("+ Add Another Token Distribution") and st.session_state.num_additional_tokens < 5:
             st.session_state.num_additional_tokens += 1
         
         # Display additional token distributions
@@ -981,9 +1007,8 @@ def main():
                 token_dfs.append(df)
         
         # Combine all token distributions
-        if token_dfs:
-            scaling_df = combine_token_distributions(token_dfs)
-            data['scaling_df'] = scaling_df
+        token_distribution_df = combine_token_distributions(token_dfs)
+        data['token_distribution_df'] = token_distribution_df
 
 
     if pct == 1:

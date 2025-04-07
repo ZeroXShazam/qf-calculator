@@ -389,68 +389,32 @@ def get_qf_matching(algo, donation_df, matching_cap_percent, matching_amount, cl
 
     return result
 
-def tunable_qf(donation_df, boost_df=None, matching_pool=25000, matching_cap_percent=0.2):
+def tunable_qf(donation_df, token_distribution_df, matching_cap_percent, matching_amount):
     """
     Calculate quadratic funding with boost factors from token distributions.
     
     Args:
-        donation_df: DataFrame with columns ['voter', 'project_name', 'recipient_address', 'amountUSD']
-        boost_df: Optional DataFrame with columns ['address', 'scale'] where scale includes the boost multiplier
-        matching_pool: Total matching funds available
-        matching_cap_percent: Maximum percentage of matching funds any project can receive (0-1)
+        donation_df: DataFrame with voter donations
+        token_distribution_df: DataFrame with [address, scale_factor] columns
+        matching_cap_percent: Maximum percentage for matching
+        matching_amount: Total matching pool size
     """
-    # Apply boosts if provided
-    if boost_df is not None:
-        # Use existing apply_boosts function
-        donation_df = apply_boosts(donation_df, boost_df)
+    # Create votes matrix
+    votes_df = pivot_votes(donation_df)
+    
+    # Apply scale factors if provided
+    if token_distribution_df is not None:
+        # Convert token_distribution_df index to lowercase for matching
+        token_distribution_df = token_distribution_df.copy()
+        token_distribution_df.set_index(token_distribution_df.columns[0], inplace=True)
+        token_distribution_df.index = token_distribution_df.index.str.lower()
 
-    # Group donations by project
-    projects = donation_df.groupby(['project_name', 'recipient_address']).agg({
-        'amountUSD': ['sum', lambda x: np.square(np.sum(np.sqrt(x)))]
-    }).reset_index()
+        # Apply scale factors to each voter's donations
+        for voter in votes_df.index:
+            voter_lower = voter.lower()
+            if voter_lower in token_distribution_df.index:
+                scale = token_distribution_df.loc[voter_lower, 'scale_factor']
+                votes_df.loc[voter] *= scale
     
-    projects.columns = ['project_name', 'recipient_address', 'direct_donations', 'funding_mechanism']
-    
-    # Calculate matching funding
-    projects['matching_funding'] = projects['funding_mechanism'] - projects['direct_donations']
-    
-    # Calculate distribution
-    projects['matching_distribution'] = projects['matching_funding'] / projects['matching_funding'].sum()
-    
-    # Apply cap
-    projects['matching_distribution'] = np.minimum(projects['matching_distribution'], matching_cap_percent)
-    
-    # Redistribute excess above cap
-    under_cap_mask = projects['matching_distribution'] < matching_cap_percent
-    if under_cap_mask.any():
-        excess = (1 - projects.loc[~under_cap_mask, 'matching_distribution'].sum())
-        scale_factor = excess / projects.loc[under_cap_mask, 'matching_distribution'].sum()
-        projects.loc[under_cap_mask, 'matching_distribution'] *= scale_factor
-    
-    # Calculate final matching amounts
-    projects['matching_funds'] = projects['matching_distribution'] * matching_pool
-    projects['total_funding'] = projects['matching_funds'] + projects['direct_donations']
-    
-    return projects
-
-def apply_boosts(donations_df, boost_df):
-    """Apply boosts to donations based on token holdings."""
-    # Merge boosts into donations
-    boosted_donations = donations_df.merge(
-        boost_df,
-        how='left',
-        left_on='voter',
-        right_on='address'
-    )
-    
-    # Handle non-boosted donations
-    boosted_donations = boosted_donations.fillna(0)
-    
-    # Calculate boosted amounts
-    boosted_donations['boost_coefficient'] = 1 + boosted_donations['scale']
-    boosted_donations['amountUSD'] = (
-        boosted_donations['boost_coefficient'] * 
-        boosted_donations['amountUSD']
-    )
-    
-    return boosted_donations
+    # Calculate QF with scaled votes
+    return get_qf_matching('', votes_df, matching_cap_percent, matching_amount)
