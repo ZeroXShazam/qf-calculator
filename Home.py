@@ -615,20 +615,28 @@ def calculate_matching_results(data):
     ))
     
     # Add TQF results
-    tqf_results = fundingutils.tunable_qf(
+    matching_dfs.append(fundingutils.tunable_qf(
         df_with_passport,
         data['token_distribution_df'],
+        '',
         matching_cap_amount,
         matching_amount,
-    )
-    tqf_df = pd.DataFrame({
-        'project_name': tqf_results['project_name'],
-        'matching_amount_TQF': tqf_results['matching_amount']
-    })
+    ))
+
+    matching_dfs.append(fundingutils.tunable_qf(
+        df_with_passport,
+        data['token_distribution_df'],
+        data['strat'],
+        matching_cap_amount,
+        matching_amount,
+        cluster_df=votes_df_with_passport, 
+        pct_cocm=data['pct_COCM']
+    ))
 
     # Merge all results
     matching_df = pd.merge(matching_dfs[0], matching_dfs[1], on='project_name', suffixes=(f'_{data["suffix"]}', '_QF'))
-    matching_df = pd.merge(matching_df, tqf_df, on='project_name', how='left')
+    matching_df = pd.merge(matching_df, matching_dfs[2], on='project_name', suffixes=(None, '_TQF'))
+    matching_df = pd.merge(matching_df, matching_dfs[3], on='project_name', suffixes=(f'_TQF', '_TQF_COCM'))
     
     # Add project details and calculate differences
     df_unique = data['df'][['project_name', 'chain_id', 'round_id', 'application_id']].drop_duplicates()
@@ -666,7 +674,7 @@ def select_matching_strategy(s):
     """Allow user to select the matching strategy to download."""
     return st.selectbox(
         'Select the matching strategy to download:',
-        (f'{s}', 'QF', 'TQF')
+        (f'{s}', 'QF', 'TQF','TQF_COCM')
     )
 
 def prepare_output_dataframe(matching_df, strategy_choice, data):

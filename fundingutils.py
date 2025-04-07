@@ -389,7 +389,7 @@ def get_qf_matching(algo, donation_df, matching_cap_percent, matching_amount, cl
 
     return result
 
-def tunable_qf(donation_df, token_distribution_df, matching_cap_percent, matching_amount):
+def tunable_qf(donation_df, token_distribution_df,algo, matching_cap_percent, matching_amount, cluster_df=None, pct_cocm=None):
     """
     Calculate quadratic funding with boost factors from token distributions.
     
@@ -417,4 +417,4 @@ def tunable_qf(donation_df, token_distribution_df, matching_cap_percent, matchin
                 votes_df.loc[voter] *= scale
     
     # Calculate QF with scaled votes
-    return get_qf_matching('', votes_df, matching_cap_percent, matching_amount)
+    return get_qf_matching(algo, votes_df, matching_cap_percent, matching_amount, cluster_df, pct_cocm)
